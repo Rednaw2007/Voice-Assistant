@@ -39,11 +39,12 @@
       const recordBtn = document.getElementById("recordBtn");
       const statusText = document.getElementById("status");
 
-      // 1. Initialize MQTT WebSockets Connection
+      // 1. Initialize Secure MQTT Connection over SSL (Required for HTTPS/Vercel)
       try {
-        mqttClient = new Paho.MQTT.Client("broker.hivemq.com", 8000, "web_" + parseInt(Math.random() * 1000, 10));
+        mqttClient = new Paho.MQTT.Client("broker.hivemq.com", 8884, "web_" + parseInt(Math.random() * 1000, 10));
 
         mqttClient.connect({
+          useSSL: true,
           onSuccess: () => {
             statusText.innerText = "Status: Connected to MQTT Broker";
           },
@@ -56,7 +57,7 @@
         console.error("MQTT Setup Error:", err);
       }
 
-      // 2. Attach Click Listener to Button
+      // 2. Microphone Recording Logic
       recordBtn.addEventListener("click", async () => {
         if (!mediaRecorder || mediaRecorder.state === "inactive") {
           try {
@@ -82,7 +83,7 @@
       });
     });
 
-    // 3. Audio Processing & Sending Logic
+    // 3. Audio Processing & Speech Recognition Logic
     async function processAudio() {
       const apiKey = document.getElementById("apiKey").value.trim();
       const userName = document.getElementById("userSelect").value;
@@ -94,9 +95,13 @@
         return;
       }
 
-      const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+      // Clean the MIME type string (removes extra codec details that break Groq API)
+      const rawType = mediaRecorder ? mediaRecorder.mimeType : "audio/webm";
+      const mimeType = rawType.split(";")[0];
+      const audioBlob = new Blob(audioChunks, { type: mimeType });
+
       const formData = new FormData();
-      formData.append("file", audioBlob, "audio.wav");
+      formData.append("file", audioBlob, "audio.webm");
       formData.append("model", "whisper-large-v3");
 
       try {
@@ -107,11 +112,17 @@
           body: formData
         });
 
+        if (!sttResponse.ok) {
+          const errDetails = await sttResponse.text();
+          console.error("STT Error Response:", errDetails);
+          throw new Error(`STT failed with status ${sttResponse.status}`);
+        }
+
         const sttData = await sttResponse.json();
         const userText = sttData.text;
         statusText.innerText = `You said: "${userText}"`;
 
-        // Step B: Generate Answer with 3-Sentence Rule
+        // Step B: Generate Response from LLM
         const llmResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -131,22 +142,28 @@
           })
         });
 
+        if (!llmResponse.ok) {
+          const errDetails = await llmResponse.text();
+          console.error("LLM Error Response:", errDetails);
+          throw new Error(`LLM failed with status ${llmResponse.status}`);
+        }
+
         const llmData = await llmResponse.json();
         const aiReply = llmData.choices[0].message.content;
 
         statusText.innerText = `AI: ${aiReply}`;
 
-        // Step C: Send to ESP32 via MQTT
+        // Step C: Send Response to ESP32 via MQTT
         if (mqttClient && mqttClient.isConnected()) {
           const message = new Paho.MQTT.Message(aiReply);
           message.destinationName = "luther/voice_assistant/response";
           mqttClient.send(message);
         } else {
-          console.warn("MQTT is not connected. Response displayed on screen only.");
+          console.warn("MQTT is not connected. Message displayed on screen only.");
         }
 
       } catch (err) {
-        console.error(err);
+        console.error("Process Audio Error:", err);
         statusText.innerText = "Error processing request.";
       }
     }
