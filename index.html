@@ -4,27 +4,27 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Smart Voice Assistant</title>
-  <!-- Load MQTT library -->
+  <!-- Load MQTT library directly from CDN -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
   <style>
     body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #121212; color: #fff; }
     button { padding: 15px 25px; font-size: 18px; margin: 10px; border-radius: 8px; border: none; cursor: pointer; }
     .record-btn { background: #e63946; color: white; }
-    select, input { padding: 10px; font-size: 16px; margin: 10px; border-radius: 5px; }
-    #status { margin-top: 20px; font-weight: bold; color: #a8dadc; }
+    select, input { padding: 10px; font-size: 16px; margin: 10px; border-radius: 5px; width: 80%; max-width: 300px; }
+    #status { margin-top: 20px; font-weight: bold; color: #a8dadc; word-wrap: break-word; padding: 0 10px; }
   </style>
 </head>
 <body>
 
   <h2>Voice Assistant Controller</h2>
 
-  <label for="userSelect">Select User:</label>
+  <label for="userSelect">Select User:</label><br>
   <select id="userSelect">
     <option value="Luther">Luther</option>
     <option value="Sarah">Sarah</option>
-  </select><br>
+  </select><br><br>
 
-  <input type="password" id="apiKey" placeholder="Enter Groq API Key"><br>
+  <input type="password" id="apiKey" placeholder="Enter Groq API Key"><br><br>
 
   <button id="recordBtn" class="record-btn">🎤 Start Talking</button>
 
@@ -39,7 +39,7 @@
       const recordBtn = document.getElementById("recordBtn");
       const statusText = document.getElementById("status");
 
-      // 1. Initialize Secure MQTT Connection over SSL (Required for HTTPS/Vercel)
+      // 1. Initialize Secure MQTT Connection over SSL (Required for Vercel/HTTPS)
       try {
         mqttClient = new Paho.MQTT.Client("broker.hivemq.com", 8884, "web_" + parseInt(Math.random() * 1000, 10));
 
@@ -83,7 +83,7 @@
       });
     });
 
-    // 3. Audio Processing & Speech Recognition Logic
+    // 3. Audio Processing & Speech Recognition
     async function processAudio() {
       const apiKey = document.getElementById("apiKey").value.trim();
       const userName = document.getElementById("userSelect").value;
@@ -95,9 +95,9 @@
         return;
       }
 
-      // Clean the MIME type string (removes extra codec details that break Groq API)
+      // Extract clean MIME type without codecs parameters
       const rawType = mediaRecorder ? mediaRecorder.mimeType : "audio/webm";
-      const mimeType = rawType.split(";")[0];
+      const mimeType = rawType.split(";")[0] || "audio/webm";
       const audioBlob = new Blob(audioChunks, { type: mimeType });
 
       const formData = new FormData();
@@ -108,21 +108,29 @@
         // Step A: Speech-to-Text via Groq Whisper API
         const sttResponse = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
           method: "POST",
-          headers: { "Authorization": `Bearer ${apiKey}` },
+          headers: { 
+            "Authorization": `Bearer ${apiKey}`
+          },
           body: formData
         });
 
+        const sttData = await sttResponse.json();
+
         if (!sttResponse.ok) {
-          const errDetails = await sttResponse.text();
-          console.error("STT Error Response:", errDetails);
-          throw new Error(`STT failed with status ${sttResponse.status}`);
+          console.error("STT Error Details:", sttData);
+          statusText.innerText = `STT Error (${sttResponse.status}): ${sttData.error?.message || "Failed to process audio"}`;
+          return;
         }
 
-        const sttData = await sttResponse.json();
         const userText = sttData.text;
+        if (!userText || !userText.trim()) {
+          statusText.innerText = "No speech detected. Try speaking again.";
+          return;
+        }
+
         statusText.innerText = `You said: "${userText}"`;
 
-        // Step B: Generate Response from LLM
+        // Step B: Generate AI Response via Llama 3.3
         const llmResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -135,22 +143,22 @@
             messages: [
               {
                 role: "system",
-                content: `You are a smart voice assistant named Siri speaking to ${userName}. IMPORTANT: Keep answers brief, helpful, and strictly 3 sentences at most.`
+                content: `You are a smart voice assistant named Siri speaking to ${userName}. Keep answers brief, helpful, and strictly 3 sentences at most.`
               },
               { role: "user", content: userText }
             ]
           })
         });
 
+        const llmData = await llmResponse.json();
+
         if (!llmResponse.ok) {
-          const errDetails = await llmResponse.text();
-          console.error("LLM Error Response:", errDetails);
-          throw new Error(`LLM failed with status ${llmResponse.status}`);
+          console.error("LLM Error Details:", llmData);
+          statusText.innerText = `LLM Error (${llmResponse.status}): ${llmData.error?.message || "Failed to get reply"}`;
+          return;
         }
 
-        const llmData = await llmResponse.json();
-        const aiReply = llmData.choices[0].message.content;
-
+        const aiReply = llmData.choices[0]?.message?.content || "No response generated.";
         statusText.innerText = `AI: ${aiReply}`;
 
         // Step C: Send Response to ESP32 via MQTT
@@ -163,8 +171,8 @@
         }
 
       } catch (err) {
-        console.error("Process Audio Error:", err);
-        statusText.innerText = "Error processing request.";
+        console.error("Process Audio Exception:", err);
+        statusText.innerText = `Network or API Error: ${err.message}`;
       }
     }
   </script>
