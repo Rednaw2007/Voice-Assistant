@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Voice Assistant</title>
+  <!-- Load MQTT library directly from web CDN (No npm needed!) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #121212; color: #fff; }
+    button { padding: 15px 25px; font-size: 18px; margin: 10px; border-radius: 8px; border: none; cursor: pointer; }
+    .record-btn { background: #e63946; color: white; }
+    select, input { padding: 10px; font-size: 16px; margin: 10px; border-radius: 5px; }
+    #status { margin-top: 20px; font-weight: bold; color: #a8dadc; }
+  </style>
+</head>
+<body>
+
+  <h2>Voice Assistant Controller</h2>
+
+  <!-- User Selection -->
+  <label for="userSelect">Select User:</label>
+  <select id="userSelect">
+    <option value="Luther">Luther</option>
+    <option value="Sarah">Sarah</option>
+  </select><br>
+
+  <!-- Groq API Key Input -->
+  <input type="password" id="apiKey" placeholder="Enter Groq API Key"><br>
+
+  <!-- Controls -->
+  <button id="recordBtn" class="record-btn">🎤 Start Talking</button>
+
+  <p id="status">Status: Ready</p>
+
+  <script>
+    // 1. MQTT WebSockets Setup
+    // Replace the old mqttClient line with this SSL WebSocket connection:
+    const mqttClient = new Paho.MQTT.Client("broker.hivemq.com", 8000, "web_" + parseInt(Math.random() * 1000, 10));
+    mqttClient.connect({
+      onSuccess: () => {
+        document.getElementById("status").innerText = "Status: Connected to MQTT Broker";
+      },
+      onFailure: (err) => {
+        document.getElementById("status").innerText = "MQTT Connection Failed: " + err.errorMessage;
+      }
+    });
+
+    let mediaRecorder;
+    let audioChunks = [];
+    const recordBtn = document.getElementById("recordBtn");
+
+    // 2. Microphone Recording Logic
+    recordBtn.addEventListener("click", async () => {
+      if (!mediaRecorder || mediaRecorder.state === "inactive") {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+        mediaRecorder.onstop = processAudio;
+
+        mediaRecorder.start();
+        recordBtn.innerText = "🛑 Stop & Send";
+        document.getElementById("status").innerText = "Status: Listening...";
+      } else {
+        mediaRecorder.stop();
+        recordBtn.innerText = "🎤 Start Talking";
+        document.getElementById("status").innerText = "Status: Processing...";
+      }
+    });
+
+    // 3. Send Audio to Groq & Publish Response via MQTT
+    async function processAudio() {
+      const apiKey = document.getElementById("apiKey").value.trim();
+      const userName = document.getElementById("userSelect").value;
+
+      if (!apiKey) {
+        alert("Please enter your Groq API Key first!");
+        document.getElementById("status").innerText = "Status: Missing API Key";
+        return;
+      }
+
+      const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+      const formData = new FormData();
+      formData.append("file", audioBlob, "audio.wav");
+      formData.append("model", "whisper-large-v3");
+
+      try {
+        // Step A: Speech-to-Text via Groq Whisper API
+        const sttResponse = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${apiKey}` },
+          body: formData
+        });
+
+        const sttData = await sttResponse.json();
+        const userText = sttData.text;
+        document.getElementById("status").innerText = `You said: "${userText}"`;
+
+        // Step B: Generate Answer with 3-Sentence Rule via Groq LLM API
+        const llmResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "llama-3.3-70b-versatile",
+            max_tokens: 150,
+            messages: [
+              {
+                role: "system",
+                content: `You are a smart voice assistant named Siri speaking to ${userName}. IMPORTANT: Keep answers brief, helpful, and strictly 3 sentences at most.`
+              },
+              { role: "user", content: userText }
+            ]
+          })
+        });
+
+        const llmData = await llmResponse.json();
+        const aiReply = llmData.choices[0].message.content;
+
+        document.getElementById("status").innerText = `AI: ${aiReply}`;
+
+        // Step C: Publish AI Reply directly to MQTT Topic for ESP32
+        const message = new Paho.MQTT.Message(aiReply);
+        message.destinationName = "luther/voice_assistant/response";
+        mqttClient.send(message);
+
+      } catch (err) {
+        console.error(err);
+        document.getElementById("status").innerText = "Error processing request.";
+      }
+    }
+  </script>
+</body>
+</html>
